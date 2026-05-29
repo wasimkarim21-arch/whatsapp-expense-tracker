@@ -36,7 +36,7 @@ async function parseExpense(message, receivedAt) {
       "Authorization": `Bearer ${GROQ_API_KEY}`,
     },
     body: JSON.stringify({
-      model: "llama3-8b-8192",
+      model: "llama-3.1-8b-instant",
       temperature: 0,
       max_tokens: 200,
       messages: [
