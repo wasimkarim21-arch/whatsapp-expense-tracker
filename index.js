@@ -89,18 +89,6 @@ app.post("/webhook", async (req, res) => {
   const twiml = new twilio.twiml.MessagingResponse();
 
   try {
-    // Validate request is genuinely from Twilio
-    const twilioSignature = req.headers["x-twilio-signature"];
-    const url = process.env.WEBHOOK_URL;
-    const isValid = twilio.validateRequest(
-      TWILIO_AUTH_TOKEN, twilioSignature, url, req.body
-    );
-
-    if (!isValid) {
-      console.warn("Invalid Twilio signature — rejecting");
-      return res.status(403).send("Forbidden");
-    }
-
     const incomingMsg = req.body.Body?.trim();
     if (!incomingMsg) {
       twiml.message("⚠️ Empty message received.");
