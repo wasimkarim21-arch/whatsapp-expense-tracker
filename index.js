@@ -6,25 +6,26 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-const TWILIO_AUTH_TOKEN  = process.env.TWILIO_AUTH_TOKEN;
 const GEMINI_API_KEY     = process.env.GEMINI_API_KEY;
 const GOOGLE_SHEET_ID    = process.env.GOOGLE_SHEET_ID;
 const GOOGLE_CREDENTIALS = process.env.GOOGLE_CREDENTIALS;
 
-// Log env vars on startup (masked)
-console.log("ENV CHECK:");
-console.log("TWILIO_AUTH_TOKEN:", TWILIO_AUTH_TOKEN ? "SET" : "MISSING");
+// Safe startup logging - won't crash
+console.log("=== SERVER STARTING ===");
 console.log("GEMINI_API_KEY:", GEMINI_API_KEY ? "SET" : "MISSING");
-console.log("GOOGLE_SHEET_ID:", GOOGLE_SHEET_ID ? GOOGLE_SHEET_ID : "MISSING");
-console.log("GOOGLE_CREDENTIALS:", GOOGLE_CREDENTIALS ? "SET (length=" + GOOGLE_CREDENTIALS.length + ")" : "MISSING");
+console.log("GOOGLE_SHEET_ID:", GOOGLE_SHEET_ID || "MISSING");
+console.log("GOOGLE_CREDENTIALS length:", GOOGLE_CREDENTIALS ? GOOGLE_CREDENTIALS.length : 0);
 
-// Test parse credentials on startup
+let parsedCreds = null;
 try {
-  const creds = JSON.parse(GOOGLE_CREDENTIALS);
-  console.log("GOOGLE_CREDENTIALS parsed OK, client_email:", creds.client_email);
+  parsedCreds = JSON.parse(GOOGLE_CREDENTIALS);
+  console.log("GOOGLE_CREDENTIALS: parsed OK, email:", parsedCreds.client_email);
 } catch(e) {
-  console.error("GOOGLE_CREDENTIALS parse FAILED:", e.message);
+  console.error("GOOGLE_CREDENTIALS parse error:", e.message);
+  console.error("First 100 chars:", GOOGLE_CREDENTIALS ? GOOGLE_CREDENTIALS.substring(0, 100) : "null");
 }
+
+console.log("=== SERVER READY ===");
 
 async function parseExpense(message, receivedAt) {
   const today = new Date(receivedAt).toLocaleDateString("en-PK", {
@@ -37,15 +38,10 @@ async function parseExpense(message, receivedAt) {
 Message: "${message}"
 Today's date: ${today}
 
-Rules:
-- amount: number only (no symbols). Handle "Rs.", "PKR", "k" (3.5k = 3500)
-- currency: "PKR" always unless another currency clearly stated
-- category: pick ONE from [Food, Transport, Shopping, Health, Entertainment, Housing, Utilities, Education, Other]
-- description: short clean English description
-- date: DD/MM/YYYY — use date from message if mentioned, otherwise use today: ${today}
+Return ONLY this exact JSON format:
+{"amount":3500,"currency":"PKR","category":"Food","description":"Dinner at Kababjees","date":"27/05/2025"}
 
-Return ONLY this exact JSON:
-{"amount":3500,"currency":"PKR","category":"Food","description":"Dinner at Kababjees","date":"27/05/2025"}`;
+Categories: Food, Transport, Shopping, Health, Entertainment, Housing, Utilities, Education, Other`;
 
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
@@ -60,17 +56,15 @@ Return ONLY this exact JSON:
   );
 
   const data = await res.json();
-  console.log("Gemini response:", JSON.stringify(data).substring(0, 300));
   const raw = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-  if (!raw) throw new Error("Empty Gemini response: " + JSON.stringify(data));
+  if (!raw) throw new Error("Empty Gemini response");
   const clean = raw.replace(/```json|```/g, "").trim();
   return JSON.parse(clean);
 }
 
 async function appendToSheet(expense) {
-  const credentials = JSON.parse(GOOGLE_CREDENTIALS);
   const auth = new google.auth.GoogleAuth({
-    credentials,
+    credentials: parsedCreds,
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
   });
   const sheets = google.sheets({ version: "v4", auth });
@@ -84,40 +78,44 @@ async function appendToSheet(expense) {
 }
 
 app.post("/webhook", async (req, res) => {
-  console.log("Webhook hit!");
+  console.log("=== WEBHOOK HIT ===");
   const twiml = new twilio.twiml.MessagingResponse();
 
   try {
     const incomingMsg = req.body.Body?.trim();
-    console.log("Message received:", incomingMsg);
+    console.log("Message:", incomingMsg);
 
     if (!incomingMsg) {
       twiml.message("No message received.");
       return res.type("text/xml").send(twiml.toString());
     }
 
+    if (!parsedCreds) {
+      throw new Error("Google credentials not loaded");
+    }
+
     console.log("Calling Gemini...");
     const expense = await parseExpense(incomingMsg, new Date());
     expense.rawMessage = incomingMsg;
-    console.log("Parsed expense:", JSON.stringify(expense));
+    console.log("Parsed:", JSON.stringify(expense));
 
     console.log("Writing to sheet...");
     await appendToSheet(expense);
-    console.log("Sheet updated!");
+    console.log("Done!");
 
     twiml.message(
       `✅ Logged!\n📅 ${expense.date}\n💰 PKR ${Number(expense.amount).toLocaleString()}\n🏷️ ${expense.category}\n📝 ${expense.description}`
     );
 
   } catch (err) {
-    console.error("WEBHOOK ERROR:", err.message, err.stack);
+    console.error("ERROR:", err.message);
     twiml.message("❌ Error: " + err.message);
   }
 
   res.type("text/xml").send(twiml.toString());
 });
 
-app.get("/", (req, res) => res.send("WhatsApp Expense Tracker is running ✅"));
+app.get("/", (req, res) => res.send("WhatsApp Expense Tracker ✅"));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Listening on port ${PORT}`));
