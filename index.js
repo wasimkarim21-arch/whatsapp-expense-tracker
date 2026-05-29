@@ -6,17 +6,18 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-const GEMINI_API_KEY     = process.env.GEMINI_API_KEY;
+const GROQ_API_KEY       = process.env.GROQ_API_KEY;
 const GOOGLE_SHEET_ID    = process.env.GOOGLE_SHEET_ID;
 const GOOGLE_CREDENTIALS = process.env.GOOGLE_CREDENTIALS;
 
 console.log("=== SERVER STARTING ===");
-console.log("GEMINI_API_KEY:", GEMINI_API_KEY ? "SET (" + GEMINI_API_KEY.substring(0,6) + "...)" : "MISSING");
+console.log("GROQ_API_KEY:", GROQ_API_KEY ? "SET (" + GROQ_API_KEY.substring(0,8) + "...)" : "MISSING");
+console.log("GOOGLE_SHEET_ID:", GOOGLE_SHEET_ID || "MISSING");
 
 let parsedCreds = null;
 try {
   parsedCreds = JSON.parse(GOOGLE_CREDENTIALS);
-  console.log("GOOGLE_CREDENTIALS: OK");
+  console.log("GOOGLE_CREDENTIALS: OK, email:", parsedCreds.client_email);
 } catch(e) {
   console.error("GOOGLE_CREDENTIALS parse error:", e.message);
 }
@@ -28,61 +29,42 @@ async function parseExpense(message, receivedAt) {
     timeZone: "Asia/Karachi",
   });
 
-  const prompt = `You are an expense parser. Extract details from a casual expense message (may be Urdu/English mix) and return ONLY a JSON object, no explanation, no markdown.
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${GROQ_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "llama3-8b-8192",
+      temperature: 0,
+      max_tokens: 200,
+      messages: [
+        {
+          role: "system",
+          content: `You are an expense parser. Extract details from casual expense messages (may be Urdu/English mix) and return ONLY a JSON object, no explanation, no markdown, no code fences.
+Categories: Food, Transport, Shopping, Health, Entertainment, Housing, Utilities, Education, Other
+Return ONLY this format: {"amount":3500,"currency":"PKR","category":"Food","description":"Dinner at Kababjees","date":"27/05/2025"}`
+        },
+        {
+          role: "user",
+          content: `Message: "${message}"\nToday's date: ${today}\nReturn ONLY the JSON.`
+        }
+      ],
+    }),
+  });
 
-Message: "${message}"
-Today's date: ${today}
+  const data = await res.json();
+  console.log("Groq response status:", res.status);
 
-Return ONLY this exact JSON format:
-{"amount":3500,"currency":"PKR","category":"Food","description":"Dinner at Kababjees","date":"27/05/2025"}
+  if (data.error) throw new Error("Groq error: " + data.error.message);
 
-Categories: Food, Transport, Shopping, Health, Entertainment, Housing, Utilities, Education, Other`;
+  const raw = data.choices?.[0]?.message?.content?.trim();
+  if (!raw) throw new Error("Empty Groq response");
 
-  // Try v1beta first, then v1 as fallback
-  const urls = [
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${GEMINI_API_KEY}`,
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_API_KEY}`,
-  ];
-
-  let lastError = null;
-  for (const url of urls) {
-    try {
-      console.log("Trying:", url.split("models/")[1].split(":")[0]);
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0, maxOutputTokens: 200 },
-        }),
-      });
-
-      const data = await res.json();
-      console.log("Response status:", res.status);
-      console.log("Response:", JSON.stringify(data).substring(0, 200));
-
-      if (data.error) {
-        console.log("API error:", data.error.message);
-        lastError = data.error.message;
-        continue;
-      }
-
-      const raw = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-      if (!raw) {
-        lastError = "Empty response";
-        continue;
-      }
-
-      const clean = raw.replace(/```json|```/g, "").trim();
-      return JSON.parse(clean);
-    } catch(e) {
-      lastError = e.message;
-      console.error("Fetch error:", e.message);
-    }
-  }
-
-  throw new Error("Gemini failed: " + lastError);
+  console.log("Groq raw output:", raw);
+  const clean = raw.replace(/```json|```/g, "").trim();
+  return JSON.parse(clean);
 }
 
 async function appendToSheet(expense) {
@@ -91,7 +73,14 @@ async function appendToSheet(expense) {
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
   });
   const sheets = google.sheets({ version: "v4", auth });
-  const row = [expense.date, expense.amount, expense.currency, expense.category, expense.description, expense.rawMessage];
+  const row = [
+    expense.date,
+    expense.amount,
+    expense.currency,
+    expense.category,
+    expense.description,
+    expense.rawMessage,
+  ];
   await sheets.spreadsheets.values.append({
     spreadsheetId: GOOGLE_SHEET_ID,
     range: "Sheet1!A:F",
